@@ -34,7 +34,7 @@ Too much data? Try limiting the postcode areas:
 
 Want the postcode's county?
 ---------------------------
-Postcode entries have a `Admin_country_code` field. `Doc/Codelist.xls` maps
+Postcode entries have a `Admin_county_code` field. `Doc/Codelist.xls` maps
 these codes to county names, and `codepoint.codelist` can be used to access
 this file. For example:
 
@@ -91,7 +91,7 @@ class lazyproperty(object):
 
     def __init__(self, fget):
         self.fget = fget
-    
+
     def __get__(self, obj, type=None):
         value = self.fget(obj)
         setattr(obj, self.fget.func_name, value)
@@ -110,7 +110,7 @@ class BaseCodePoint(object):
     codelist_name = 'Doc/Codelist.xls'
     nhs_codelist_name = 'Doc/NHS_Codelist.xls'
     data_name_format = 'Data/CSV/%s.csv'
-    
+
     def entries(self, areas=None, to_proj=pyproj.Proj(init='epsg:4326')):
         """
         Iterate over postcode entries.
@@ -125,15 +125,15 @@ class BaseCodePoint(object):
         """
 
         from_proj = pyproj.Proj(init='epsg:27700') # British National grid
-        
+
         if areas is None:
             areas = self.areas
-        
+
         for area in areas:
             if not re.search(r'^[A-Za-z]{1,2}$', area):
                 raise ValueError('Incorrect format for area: '
                                  'expected 1 or 2 letters, got "%s"' % (area,))
-            
+
             for row in self._get_name_rows(self.data_name_format % area.lower()):
                 entry = OrderedDict(zip(self.long_headers, row))
                 entry['_Area'] = area
@@ -160,11 +160,11 @@ class BaseCodePoint(object):
     @lazyproperty
     def codelist(self):
         return self._get_codelist()
-    
+
     @lazyproperty
     def nhs_codelist(self):
         return self._get_nhs_codelist()
-    
+
     def _areas_from_names(self, names):
         pattern = re.compile(r'[\\/]([a-z]{1,2})\.csv$')
         for name in names:
@@ -180,10 +180,10 @@ class CodePointZip(BaseCodePoint):
 
     def __init__(self, zip_filename):
         self.zip_file = zipfile.ZipFile(zip_filename)
-    
+
     def _open(self, name):
         return self.zip_file.open(name)
-    
+
     def _read(self, name):
         return self.zip_file.read(name)
 
@@ -193,7 +193,7 @@ class CodePointZip(BaseCodePoint):
             name for name in self.zip_file.namelist()
             if fnmatch.fnmatch(name, pattern)
         )
-    
+
     def _get_name_rows(self, name):
         return csv.reader(self._open(name))
 
@@ -203,13 +203,13 @@ class CodePointZip(BaseCodePoint):
             short=short_headers,
             long=long_headers,
         )
- 
+
     def _get_metadata(self):
         return Metadata(self._open(self.metadata_name))
- 
+
     def _get_codelist(self):
         return CodeList(self.codelist_name, file_contents=self._read(self.codelist_name))
-    
+
     def _get_nhs_codelist(self):
         return NHSCodeList(self.codelist_name, file_contents=self._read(self.nhs_codelist_name))
 
@@ -223,10 +223,10 @@ class CodePointDir(BaseCodePoint):
         self.path = path
         if os.path.isdir(os.path.join(self.path, self.root)):
             self.path = os.path.join(self.path, self.root)
-    
+
     def _get_areas(self):
         return self._areas_from_names(glob.glob(os.path.join(self.path, self.data_name_format % '*')))
-    
+
     def _get_name_rows(self, name):
         return csv.reader(open(os.path.join(self.path, name)))
 
@@ -236,13 +236,13 @@ class CodePointDir(BaseCodePoint):
             short=short_headers,
             long=long_headers,
         )
- 
+
     def _get_metadata(self):
         return Metadata(open(os.path.join(self.path, self.metadata_name)))
- 
+
     def _get_codelist(self):
         return CodeList(os.path.join(self.path, self.codelist_name))
-    
+
     def _get_nhs_codelist(self):
         return NHSCodeList(os.path.join(self.path, self.nhs_codelist_name))
 
@@ -261,11 +261,11 @@ class Metadata(dict):
             if mode == 'header':
                 match = self.header_re.search(line)
                 self[match.group(1)] = match.group(2)
-            
+
             if mode == 'area_count':
                 match = self.area_count_re.search(line)
                 self['area_counts'][match.group(1)] = int(match.group(2))
-        
+
         self['total_count'] = sum(self['area_counts'].itervalues())
 
     def line_modes(self, lines):
@@ -283,18 +283,19 @@ class Metadata(dict):
                 return 'magic'
             else:
                 raise ValueError('Expected "%s" text on first line of metadata file' % magic)
-        
+
         if prev_mode in ('magic', 'header',):
             if self.header_re.search(line):
                 return 'header'
             elif self.area_count_re.search(line):
                 return 'area_count'
-        
+
         if prev_mode == 'area_count':
             if self.area_count_re.search(line):
                 return 'area_count'
-        
-        raise ValueError('Can\'t get next mode from mode "%s" and line "%s"' % (mode, line,))
+
+        raise ValueError('Can\'t get next mode from mode "%s" and line "%s"' %
+                         (prev_mode, line,))
 
 
 class CodeList(dict):
@@ -312,7 +313,7 @@ class CodeList(dict):
             if sheet.name == 'Metadata':
                 # The metadata sheet doesn't have any lookups.
                 continue
-            
+
             self[sheet.name] = dict(
                 (key, value)
                 for (value, key) in (
@@ -325,7 +326,7 @@ class CodeList(dict):
                 # The AREA_CODES sheet has a mapping of sheet names to
                 # friendlier names. We'll use these at the end of the loop.
                 lookup_aliases = self[sheet.name]
-        
+
         for alias, lookup_name in lookup_aliases.iteritems():
             self[alias] = self[lookup_name]
 

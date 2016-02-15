@@ -65,12 +65,16 @@ import glob
 import os.path
 import pyproj
 import re
-import xlrd
+from StringIO import StringIO
 import zipfile
 
+import xlrd
+import openpyxl
 
 __all__ = ['open_codepoint', 'CodePointDir', 'CodePointZip']
 
+class FileNotFoundError(Exception):
+    pass
 
 def open_codepoint(filename):
     """
@@ -107,8 +111,8 @@ class BaseCodePoint(object):
     root = ''
     headers_name = 'Doc/Code-Point_Open_Column_Headers.csv'
     metadata_name = 'Doc/metadata.txt'
-    codelist_name = 'Doc/Codelist.xls'
-    nhs_codelist_name = 'Doc/NHS_Codelist.xls'
+    codelist_names = ['Doc/Codelist.xls', 'Doc/Codelist.xlsx']
+    nhs_codelist_names = ['Doc/NHS_Codelist.xls', 'Doc/NHS_Codelist.xlsx']
     data_name_format = 'Data/CSV/%s.csv'
 
     def entries(self, areas=None, to_proj=pyproj.Proj(init='epsg:4326')):
@@ -173,6 +177,14 @@ class BaseCodePoint(object):
                 yield match.group(1)
 
 
+    def _get_codelist(self):
+        return self._construct_codelist(CodeList, self.codelist_names)
+
+    def _get_nhs_codelist(self):
+        return self._construct_codelist(NHSCodeList, self.nhs_codelist_names)
+
+
+
 class CodePointZip(BaseCodePoint):
     """
     Read CodePoint data from a zip file.
@@ -207,11 +219,16 @@ class CodePointZip(BaseCodePoint):
     def _get_metadata(self):
         return Metadata(self._open(self.metadata_name))
 
-    def _get_codelist(self):
-        return CodeList(self.codelist_name, file_contents=self._read(self.codelist_name))
-
-    def _get_nhs_codelist(self):
-        return NHSCodeList(self.codelist_name, file_contents=self._read(self.nhs_codelist_name))
+    def _construct_codelist(self, list_class, potential_filenames):
+        for filename in potential_filenames:
+            try:
+                contents = self._read(filename)
+            except KeyError:
+                continue # Try the next one in the list
+            return list_class(filename, file_contents=contents)
+        else:
+            raise FileNotFoundError("Could not find code list file: tried %s" %
+                                    (", ".join(potential_filenames)))
 
 
 class CodePointDir(BaseCodePoint):
@@ -240,12 +257,21 @@ class CodePointDir(BaseCodePoint):
     def _get_metadata(self):
         return Metadata(open(os.path.join(self.path, self.metadata_name)))
 
-    def _get_codelist(self):
-        return CodeList(os.path.join(self.path, self.codelist_name))
 
+    def _construct_codelist(self, list_class, potential_filenames):
+        for filename in potential_filenames:
+            full_pathname = os.path.join(self.path, filename)
+            if os.path.exists(full_pathname):
+                return list_class(full_pathname)
+        else:
+            raise FileNotFoundError("Could not find code list file: tried %s" %
+                                    (", ".join(potential_filenames)))
+
+    FOO = """
+    def _get_codelist(self):
     def _get_nhs_codelist(self):
         return NHSCodeList(os.path.join(self.path, self.nhs_codelist_name))
-
+    """
 
 class Metadata(dict):
     """
@@ -298,16 +324,59 @@ class Metadata(dict):
                          (prev_mode, line,))
 
 
-class CodeList(dict):
+class _ExcelCodeList(dict):
+    """
+    Base class for dicts generated from Excel files.
+    """
+    def __init__(self, filename, file_contents=None):
+        if filename.lower().endswith(".xlsx"):
+            book = self._load_xslx_workbook(filename, file_contents)
+            self._init_from_xlsx(book)
+        else:
+            book = xlrd.open_workbook(filename, file_contents=file_contents)
+            self._init_from_xls(book)
+
+    def _load_xslx_workbook(self, filename, file_contents):
+        if isinstance(file_contents, str):
+            file_stream = StringIO(file_contents)
+        else:
+            file_stream = file_contents
+        return openpyxl.load_workbook(file_stream or filename)
+
+    def _get_mappings_from_xlsx_sheet(self, book, sheet_name):
+        """Return a dict mapping codes to human-readable-names"""
+        sheet = book[sheet_name]
+
+        def _ordered_pair(first, second):
+            if self.NAMES_BEFORE_CODES:
+                return (second, first)
+            else:
+                return (first, second)
+
+        return dict(
+            _ordered_pair(first, second)
+            for (first, second) in (
+                (sheet.cell(row=row_index, column=sheet.min_column).value,
+                 sheet.cell(row=row_index, column=sheet.max_column).value)
+                for row_index in xrange(sheet.min_row, sheet.max_row+1)
+            )
+        )
+
+
+class CodeList(_ExcelCodeList):
     """
     The CodePoint download has a Doc/Codelist.xls Excel-format spreadsheet.
     This has multiple worksheets, with one lookup table per sheet.
     `CodeList` reads in those lookup tables. Use it via `codepoint.codelist`.
     """
 
-    def __init__(self, filename, file_contents=None):
-        book = xlrd.open_workbook(filename, file_contents=file_contents)
+    NAMES_BEFORE_CODES = True
 
+    def _populate_lookup_aliases(self, lookup_aliases):
+        for alias, lookup_name in lookup_aliases.iteritems():
+            self[alias] = self[lookup_name]
+
+    def _init_from_xls(self, book):
         lookup_aliases = {}
         for sheet in book.sheets():
             if sheet.name == 'Metadata':
@@ -327,20 +396,36 @@ class CodeList(dict):
                 # friendlier names. We'll use these at the end of the loop.
                 lookup_aliases = self[sheet.name]
 
-        for alias, lookup_name in lookup_aliases.iteritems():
-            self[alias] = self[lookup_name]
+        self._populate_lookup_aliases(lookup_aliases)
+
+    def _init_from_xlsx(self, book):
+        lookup_aliases = {}
+        for sheet_name in book.sheetnames:
+            if sheet_name == 'Metadata':
+                # The metadata sheet doesn't have any lookups.
+                continue
+
+            self[sheet_name] = self._get_mappings_from_xlsx_sheet(book,
+                                                                  sheet_name)
+
+            if sheet_name == 'AREA_CODES':
+                # The AREA_CODES sheet has a mapping of sheet names to
+                # friendlier names. We'll use these at the end of the loop.
+                lookup_aliases = self[sheet_name]
+
+        self._populate_lookup_aliases(lookup_aliases)
 
 
-class NHSCodeList(dict):
+class NHSCodeList(_ExcelCodeList):
     """
     Similar to `CodeList`, but:
       * No Metadata or AREA_CODES worksheet.
       * The key and value columns are in the opposite order.
     """
 
-    def __init__(self, filename, file_contents=None):
-        book = xlrd.open_workbook(filename, file_contents=file_contents)
+    NAMES_BEFORE_CODES = False
 
+    def _init_from_xls(self, book):
         for sheet in book.sheets():
             self[sheet.name] = dict(
                 (key, value)
@@ -349,3 +434,8 @@ class NHSCodeList(dict):
                     for row_index in xrange(sheet.nrows)
                 )
             )
+
+    def _init_from_xlsx(self, book):
+        for sheet_name in book.sheetnames:
+            self[sheet_name] = self._get_mappings_from_xlsx_sheet(book,
+                                                                  sheet_name)
